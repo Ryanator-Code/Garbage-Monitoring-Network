@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Battery Log Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+    }
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid #30363d;
+      background: #161b22;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header h1 {
+      font-size: 20px;
+      margin: 0;
+    }
+    main {
+      padding: 16px 24px 32px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+      align-items: center;
+    }
+    .controls label {
+      font-size: 14px;
+      color: #8b949e;
+    }
+    select {
+      background: #0d1117;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 14px;
+    }
+    canvas {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+    }
+    .stats {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #8b949e;
+    }
+    .stats span {
+      margin-right: 16px;
+    }
+    .legend {
+      font-size: 12px;
+      margin-top: 4px;
+      color: #8b949e;
+    }
+    .notice {
+      font-size: 13px;
+      color: #8b949e;
+      margin-top: 8px;
+    }
+    .chart-container {
+      position: relative;
+      height: 400px;
+      width: 100%;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Battery Log Viewer</h1>
+    <div style="font-size:12px;color:#8b949e;">Data source: battery_log.csv</div>
+  </header>
+  <main>
+    <div class="controls">
+      <label>
+        Node:
+        <select id="chipSelect"></select>
+      </label>
+      <label>
+        Role:
+        <select id="roleSelect">
+          <option value="all">All</option>
+          <option value="HEAD">HEAD</option>
+          <option value="WORKER">WORKER</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="chart-container">
+      <canvas id="batteryChart"></canvas>
+    </div>
+    <div class="legend">Y-axis: battery (as logged from firmware). X-axis: timestamp.</div>
+    <div class="stats" id="stats"></div>
+    <div class="notice">
+      This viewer is standalone and does not affect the main dashboard. Refresh the page to reload the latest CSV data.
+    </div>
+  </main>
+
+  <script>
+    let rawData = [];
+    let chart = null;
+
+    async function loadBatteryLog() {
+      const res = await fetch('/api/battery-log');
+      if (!res.ok) {
+        console.error('Failed to load battery log');
+        return;
+      }
+      rawData = await res.json();
+      initControls();
+      updateChart();
+    }
+
+    function initControls() {
+      const chipSelect = document.getElementById('chipSelect');
+      const chips = Array.from(new Set(rawData.map(d => d.chip_id).filter(Boolean)));
+      chipSelect.innerHTML = '';
+      chips.forEach(chip => {
+        const opt = document.createElement('option');
+        opt.value = chip;
+        opt.textContent = chip;
+        chipSelect.appendChild(opt);
+      });
+      chipSelect.addEventListener('change', updateChart);
+      document.getElementById('roleSelect').addEventListener('change', updateChart);
+    }
+
+    function updateChart() {
+      const chipSelect = document.getElementById('chipSelect');
+      const roleSelect = document.getElementById('roleSelect');
+      const chipId = chipSelect.value;
+      const roleFilter = roleSelect.value;
+
+      if (!chipId) return;
+
+      let filtered = rawData.filter(d => d.chip_id === chipId);
+      if (roleFilter !== 'all') {
+        filtered = filtered.filter(d => (d.role || '').toUpperCase() === roleFilter);
+      }
+
+      // Keep only entries with a valid, positive battery value
+      filtered = filtered.filter(d => typeof d.battery === 'number' && d.battery > 0);
+
+      // Sort by timestamp
+      filtered.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+      // Downsample if there are too many points (for performance)
+      const MAX_POINTS = 1000;
+      if (filtered.length > MAX_POINTS) {
+        const step = Math.ceil(filtered.length / MAX_POINTS);
+        filtered = filtered.filter((_, idx) => idx % step === 0);
+      }
+
+      const labels = filtered.map(d => d.timestamp);
+
+      // Smooth the battery series with a simple moving average
+      const rawBatteryValues = filtered.map(d => d.battery);
+      const batteryValues = smoothSeries(rawBatteryValues, 5);
+
+      const ctx = document.getElementById('batteryChart').getContext('2d');
+
+      if (chart) {
+        chart.destroy();
+      }
+
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: `Battery (${chipId})`,
+            data: batteryValues,
+            borderColor: '#58a6ff',
+            backgroundColor: 'rgba(88,166,255,0.15)',
+            borderWidth: 2,
+            pointRadius: 2,
+            tension: 0.2,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: {
+              ticks: { color: '#8b949e', maxRotation: 45, minRotation: 45 },
+              grid: { color: '#21262d' }
+            },
+            y: {
+              min: 0,
+              max: 6.4,
+              ticks: { color: '#8b949e', stepSize: 0.5 },
+              grid: { color: '#21262d' }
+            }
+          },
+          plugins: {
+            legend: {
+              labels: { color: '#c9d1d9' }
+            },
+            tooltip: {
+              callbacks: {
+                label: ctx => `Battery: ${ctx.parsed.y}`
+              }
+            }
+          }
+        }
+      });
+
+      updateStats(filtered);
+    }
+
+    // Simple moving-average smoother to make the curve less jagged
+    function smoothSeries(values, windowSize) {
+      if (!values.length || windowSize <= 1) return values.slice();
+      const result = [];
+      const half = Math.floor(windowSize / 2);
+      for (let i = 0; i < values.length; i++) {
+        let sum = 0;
+        let count = 0;
+        for (let j = i - half; j <= i + half; j++) {
+          if (j >= 0 && j < values.length) {
+            sum += values[j];
+            count++;
+          }
+        }
+        result.push(sum / count);
+      }
+      return result;
+    }
+
+    function updateStats(data) {
+      const statsEl = document.getElementById('stats');
+      if (!data.length) {
+        statsEl.textContent = 'No battery samples for this selection.';
+        return;
+      }
+      const values = data.map(d => d.battery);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const avg = values.reduce((a, b) => a + b, 0) / values.length;
+      statsEl.innerHTML =
+        `<span>Samples: ${values.length}</span>` +
+        `<span>Min: ${min.toFixed(3)}</span>` +
+        `<span>Max: ${max.toFixed(3)}</span>` +
+        `<span>Avg: ${avg.toFixed(3)}</span>`;
+    }
+
+    window.addEventListener('load', loadBatteryLog);
+  </script>
+</body>
+</html>
